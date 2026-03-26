@@ -1,0 +1,26 @@
+# Entorno virtual
+.venv
+env/
+venv/
+
+# Byte-compiled / cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Configs y secretos
+.env
+*.env
+
+# VSCode
+.vscode/
+
+# Sistemas
+.DS_Store
+
+# FAISS index y sesiones (generados)
+faiss_index/
+flask_sessions/
+
+# Uploads temporales
+uploads/

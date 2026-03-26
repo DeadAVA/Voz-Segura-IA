@@ -1,0 +1,68 @@
+/* Contenedor de bienvenida */
+.welcome-container {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    width: calc(100% - 250px); /* Ajuste para evitar que se mueva */
+    height: 100vh;
+    transition: opacity 0.3s ease, transform 0.3s ease;
+}
+/* Mensaje de bienvenida */
+.welcome-container p {
+    font-size: 1.5rem;
+    color: #4A0072;
+    font-weight: 600;
+}
+
+/* Estilo mejorado del input-container */
+.input-container2 {
+    width: 90%;
+    max-width: 600px;
+    display: flex;
+    align-items: center;
+    background: #fff;
+    border-radius: 30px;
+    padding: 10px;
+    box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.1);
+    transition: all 0.3s ease-in-out;
+}
+
+/* Input más limpio */
+#welcomeInput {
+    flex-grow: 1;
+    border: none;
+    padding: 12px;
+    border-radius: 30px;
+    font-size: 16px;
+    outline: none;
+    resize: none;
+    background: transparent;
+    color: #4A0072;
+}
+
+/* Botón de enviar */
+#welcomeSendButton {
+    width: 45px;
+    height: 45px;
+    border-radius: 50%;
+    background-color: #7D3CB0;
+    color: white;
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.3s ease;
+}
+
+#welcomeSendButton:hover {
+    background-color: #9E5FCD;
+    transform: scale(1.1);
+}
+
+/* Icono dentro del botón */
+#welcomeSendButton i {
+    font-size: 18px;
+}

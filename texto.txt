@@ -1,0 +1,1029 @@
+@app.route("/chat", methods=["POST"])
+def chat():
+    try:
+        data = request.json
+        user_message = data.get("message", "").strip().lower()
+        
+        if not user_message:
+            return jsonify({"response": "No recibí ningún mensaje. 😕"})
+
+        # Inicializar la conversación en session si no existe
+        if "messages" not in session:
+            session["messages"] = []
+
+        # -----------------------------------------------------------------------
+        # 1) ¿Estamos en proceso de llenar datos de denuncia?
+        # -----------------------------------------------------------------------
+        if "datos_faltantes" in session and session["datos_faltantes"]:
+            datos_faltantes = session["datos_faltantes"]
+            datos_usuario = session.get("datos_usuario", {})
+            dato_actual = datos_faltantes[0]
+
+            # CANCELAR (misma lógica)
+            if user_message.startswith("cancelar"):
+                session.pop("datos_faltantes", None)
+                session.pop("datos_usuario", None)
+                texto = "Proceso cancelado. ¿En qué más puedo ayudarte?"
+                audio_response_path = text_to_speech(texto)
+                return jsonify({"response": "❌ Proceso cancelado. ¿En qué más puedo ayudarte?", "audio_response": audio_response_path})
+
+            # OMITIR (misma lógica)
+            if user_message.startswith("omitir"):
+                datos_usuario[dato_actual] = "_________________________"
+                remaining_faltantes = datos_faltantes[1:]  # Avanzamos al siguiente dato
+                
+                if dato_actual == "narraciones":
+                    if "narraciones" not in datos_usuario:
+                        datos_usuario["narraciones"] = []
+
+                    if not session.get("ejemplo_narraciones_mostrado", False):
+                        session["ejemplo_narraciones_mostrado"] = True
+                        ejemplo_narracion = (
+                            "Ejemplo de narración de hechos:\n\n"
+                            "El cinco de febrero de dos mil diecisiete, estando presentes en la oficina de XXX, "
+                            "ubicada en las calles de XXX, el denunciado me agredió verbalmente al señalar que "
+                            "no debía participar como candidata al cargo de XXXX, indicando expresamente: "
+                            "“ustedes las mujeres no sirven para esto de la política, no tienen que salir de su casa "
+                            "y deben quedarse en la cocina”.\n\n"
+                            "Con estas expresiones, se vulneran derechos como la participación política, "
+                            "la no discriminación y la vida libre de violencia.\n\n"
+                            "Por favor, ingresa tu primer relato de hechos ahora. O escribe 'omitir' si no deseas narrarlo, "
+                            "o 'cancelar' para salir."
+                        )
+                        return jsonify({"response": ejemplo_narracion})
+
+                # Si el dato omitido es 'tipo_prueba', marcarlo y almacenar los campos dependientes
+                if dato_actual == "tipo_prueba":
+                    session["tipo_prueba_omitido"] = True  # Indicamos que fue omitido
+                    session["campos_dependientes_tipo_prueba"] = {
+                        "quien_desahoga", "numero_notarial", "notario_publico_numero",
+                        "donde_funciones_notario", "fecha_intrumento_notarial",
+                        "prueba_confesional", "prueba_testimonial", "documento_prueba",
+                        "numeros_prueba","folio","fecha_folio", "documentos_oficiales"
+                    }
+
+                # Filtrar correctamente si `tipo_prueba` fue omitido
+                if session.get("tipo_prueba_omitido", False):
+                    remaining_faltantes = [
+                        d for d in remaining_faltantes if d not in session["campos_dependientes_tipo_prueba"]
+                    ]
+
+                # Guardamos los cambios en la sesión
+                session["datos_faltantes"] = remaining_faltantes
+                session["datos_usuario"] = datos_usuario
+                texto = f"Se ha omitido **{dato_actual}** automáticamente porque omitiste `tipo_prueba`"
+                audio_response_path = text_to_speech(texto)
+                # 🚨 **Aquí interceptamos cada campo dependiente cuando el usuario lo intenta proporcionar**
+                if dato_actual in session.get("campos_dependientes_tipo_prueba", set()):
+                    return jsonify({
+                        "response": markdown.markdown(f"✅ Se ha omitido **{dato_actual}** automáticamente porque omitiste `tipo_prueba`."),
+                        "audio_response": audio_response_path
+                    })
+
+                # 🚀 **Verificar si el siguiente dato también es un campo dependiente y omitirlo automáticamente**
+                while session["datos_faltantes"] and session["datos_faltantes"][0] in session.get("campos_dependientes_tipo_prueba", set()):
+                    omitido = session["datos_faltantes"].pop(0)  # Eliminar el dato dependiente
+                    datos_usuario[omitido] = "_________________________"
+
+                # Verificar si hay más datos faltantes después de la omisión
+                if session["datos_faltantes"]:
+                    siguiente_dato = session["datos_faltantes"][0]
+
+                    # Si el siguiente dato es una medida, mostrar opciones directamente
+                    if siguiente_dato == "medidas_cautelares":
+                        opciones_str = "\n".join(f"{i+1}. {op}" for i, op in enumerate(MEDIDAS_CAUTELARES_OPCIONES))
+                        session["pidiendo_medidas_cautelares"] = True  
+                        texto = f"Se ha omitido **{dato_actual}**. Ahora, selecciona las **medidas cautelares** que solicitas para proteger tus derechos. Estas son las opciones disponibles: {opciones_str}. Para seleccionar, escribe los números separados por comas (ej: '1,3'). Escribe 'otra' para agregar una medida no listada. Cuando termines, escribe 'terminar'."
+                        audio_response_path = text_to_speech(texto)
+                        return jsonify({
+                            "response": markdown.markdown(
+                                f"✅ Se ha omitido **{dato_actual}**.\n\n"
+                                "Ahora, selecciona las **medidas cautelares** que solicitas para proteger tus derechos.\n\n"
+                                "Estas son las opciones disponibles:\n\n"
+                                f"{opciones_str}\n\n"
+                                "Para seleccionar, escribe los números separados por comas (ej: '1,3'). "
+                                "Escribe 'otra' para agregar una medida no listada. "
+                                "Cuando termines, escribe 'terminar'."
+                            ),
+                           "audio_response": audio_response_path
+                        
+                        })
+                    elif siguiente_dato == "medidas_proteccion":
+                        opciones_str = "\n".join(f"{i+1}. {op}" for i, op in enumerate(MEDIDAS_PROTECCION_OPCIONES))
+                        session["pidiendo_medidas_proteccion"] = True
+                        texto = markdown.markdown(f"✅ Se ha omitido **{dato_actual}**. Ahora, selecciona las **medidas de protección** que solicitas para proteger tus derechos. Estas son las medidas de protección disponibles: {opciones_str} Para seleccionar, escribe los números separados por comas (ej: '1,3'). Escribe 'otra' para agregar una medida no listada. Cuando termines, escribe 'terminar'.")
+                        audio_response_path = text_to_speech(texto)
+                        return jsonify({
+                            "response": markdown.markdown(
+                                f"✅ Se ha omitido **{dato_actual}**.\n\n"
+                                "Ahora, selecciona las **medidas de protección** que solicitas para proteger tus derechos.\n\n"
+                                "Estas son las medidas de protección disponibles:\n\n"
+                                f"{opciones_str}\n\n"
+                                "Para seleccionar, escribe los números separados por comas (ej: '1,3'). "
+                                "Escribe 'otra' para agregar una medida no listada. "
+                                "Cuando termines, escribe 'terminar'."
+                            ),
+                            "audio_response": audio_response_path
+                        })
+                    
+                    # Verificar si el siguiente dato es `tipo_prueba` (por seguridad)
+                    elif siguiente_dato == "tipo_prueba":
+                        session["ha_preguntado_tipo_prueba"] = True
+                        texto = "¿Qué tipo de prueba deseas ofrecer? Elige una opción: 1️.Confesional,2️.Testimonial, 3️.Documental Pública o Privada, 4️.Presuncional Legal y Humana, 5️.Instrumental de Actuaciones, Escribe el número de la opción que deseas elegir. puedes escribir para omitir o cancelar para terminar el proceso"
+                        audio_response_path = text_to_speech(texto)
+                        return jsonify({
+                            "response": (
+                                "¿Qué tipo de prueba deseas ofrecer? Elige una opción:\n"
+                                "1️⃣ Confesional\n"
+                                "2️⃣ Testimonial\n"
+                                "3️⃣ Documental Pública o Privada\n"
+                                "4️⃣ Presuncional Legal y Humana\n"
+                                "5️⃣ Instrumental de Actuaciones\n"
+                                "Escribe el número de la opción que deseas elegir. puedes escribir para omitir o cancelar para terminar el proceso"
+                            ),
+                            "audio_response": audio_response_path
+                        })
+
+                    # Preguntar por el siguiente dato normalmente
+                    desc = field_info.get(siguiente_dato, {}).get("descripcion", "")
+                    ejemp = field_info.get(siguiente_dato, {}).get("ejemplo", "")
+                    texto = f"Se ha omitido **{dato_actual}**.Ahora, **{siguiente_dato}** es importante {desc}. {ejemp}. ¿Podrías proporcionarlo ahora? O escribe 'omitir' si no deseas darlo, o 'cancelar' para detener el proceso."
+                    audio_response_path = text_to_speech(texto)
+                    return jsonify({
+                        "response": markdown.markdown(
+                            f"✅ Se ha omitido **{dato_actual}**.\n\n"
+                            f"Ahora, **{siguiente_dato}** es importante {desc}.\n\n"
+                            f"{ejemp}\n\n"
+                            "¿Podrías proporcionarlo ahora? "
+                            "O escribe 'omitir' si no deseas darlo, o 'cancelar' para detener el proceso."
+                        ),
+                        "audio_response": audio_response_path
+                    })
+
+                # Si no hay más datos faltantes, generar la denuncia
+                else:
+                    try:
+                        resultado = procesar_denuncia(datos_usuario)
+
+                        # Verificamos si faltan datos obligatorios
+                        if isinstance(resultado, dict) and "error" in resultado:
+                            session["datos_faltantes"] = resultado["faltantes"]
+                            return jsonify({
+                                "response": markdown.markdown(f"⚠️ Faltan datos: {', '.join(resultado['faltantes'])}. Por favor, ingrésalos para continuar.")
+                            })
+
+                        session["pdf_path"] = resultado
+                        session.pop("datos_faltantes", None)
+                        session.pop("datos_usuario", None)
+                        session.pop("tipo_prueba_omitido", None)  # Limpiamos la sesión
+                        session.pop("campos_dependientes_tipo_prueba", None)
+                        texto = "La denuncia ha sido generada correctamente. Puedes descargarla en el link que te genere. Este es un formato de denuncia con los datos proporcionados. Puedes revisarlo y editarlo si lo deseas. ¡Estoy aquí para ayudarte!"
+                        audio_response_path = text_to_speech(texto)
+                        return jsonify({
+                            "response": (
+                                "✅ La denuncia ha sido generada correctamente. "
+                                "Puedes descargarla aquí: /download_sue\n\n"
+                                "Este es un formato de denuncia con los datos proporcionados. "
+                                "Puedes revisarlo y editarlo si lo deseas. ¡Estoy aquí para ayudarte! 😊"
+                            ),
+                            "audio_response": audio_response_path
+                        })
+                    except Exception as e:
+                        return jsonify({"response": f"❌ Error al generar la denuncia: {str(e)}"}), 500
+
+            # -------------------------------------------------------------------
+            # Manejo de preguntas/dudas y "continuar"
+            # -------------------------------------------------------------------
+            # Si detectamos que el usuario tiene dudas/preguntas, respondemos sin avanzar de campo.
+            dudas_triggers = ["duda", "pregunta", "?", "por qué", "porque", "no entiendo", "ayuda", "para qué", "para que", "por que", "como puedo", "como"]
+            if any(trigger in user_message for trigger in dudas_triggers):
+                # Llamamos al LLM con un prompt que explique el campo y pregunte si desea continuar
+                explanation_prompt = f"""
+                {SYSTEM_PROMPT}
+
+                ### Contexto:
+                El usuario está llenando un **formato de denuncia** y tiene dudas o quiere más información 
+                sobre el siguiente dato: **{dato_actual}**.
+                Explícale por qué es importante, dale ejemplos si aplica. 
+                Luego, termina la respuesta con una frase para saber si quiere 
+                'continuar' o si tiene más dudas, por ejemplo:
+                "¿Tienes más dudas o deseas continuar con la denuncia?"
+                
+                📩 Pregunta del usuario: "{user_message}"
+                """
+
+                messages = session["messages"]
+                messages.append({"role": "user", "content": user_message})
+
+                completion_exp = client.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[{"role": "system", "content": explanation_prompt}] + messages,
+                    max_tokens=500
+                )
+                explanation_response = (completion_exp.choices[0].message.content 
+                                        if completion_exp.choices else "No se pudo obtener una respuesta clara.")
+
+                # Actualizamos 'messages'
+                session["messages"] = messages
+
+                # Devolvemos la explicación; seguimos en el MISMO dato
+                return jsonify({"response": explanation_response})
+
+            # Si el usuario dice "continuar", interpretamos que ya no tiene más dudas 
+            # y quiere dar el dato. Le pedimos que ingrese el valor (o lo revalidamos).
+            continuar_triggers = ["continuar", "avanzar", "seguir", "ok", "listo", "entiendo", "comprendo", "ya entendí", "ya entendi"]
+            if any(trigger in user_message for trigger in continuar_triggers):
+                # Obtener el campo actual (o el siguiente campo, según tu lógica)
+                if "datos_faltantes" in session and session["datos_faltantes"]:
+                    siguiente_dato = session["datos_faltantes"][0]
+                    # Simplemente le dices al usuario: "ok, continuemos con ... "
+                    return jsonify({
+                        "response": markdown.markdown(
+                            f"Perfecto, continuemos con la denuncia. "
+                            f"El siguiente dato que necesito es **{siguiente_dato}**. "
+                            "Por favor, ingrésalo, o escribe 'omitir' si no deseas proporcionarlo, "
+                            "o 'cancelar' para detener el proceso."
+                        ),
+                        "audio_response": audio_response_path
+                    })
+                else:
+                    return jsonify({
+                        "response": (
+                            "No hay más datos pendientes. Parece que la denuncia está casi completa. "
+                            "Si deseas revisarla o generar el PDF, avísame."
+                        ),
+                        "audio_response": audio_response_path
+                    })
+                    
+            # --------------------------------
+            #  1) MEDIDAS CAUTELARES
+            # --------------------------------
+            if dato_actual == "medidas_cautelares":
+                # Si no existe la lista en datos_usuario, se crea
+                if "medidas_cautelares_lista" not in datos_usuario:
+                    datos_usuario["medidas_cautelares_lista"] = []
+
+                # Siempre mostrar la lista de opciones antes de esperar la respuesta del usuario
+                opciones_str = "\n".join(f"{i+1}. {op}" for i, op in enumerate(MEDIDAS_CAUTELARES_OPCIONES))
+                
+                # Si el usuario no ha ingresado nada aún, se le muestran las opciones
+                if not session.get("pidiendo_medidas_cautelares", False):
+                    session["pidiendo_medidas_cautelares"] = True
+                    texto = f"Estas son las medidas cautelares disponibles: {opciones_str}. Para seleccionar, escribe los números separados por comas (ej: '1,3'). Escribe 'otra' para agregar una medida no listada. Cuando termines, escribe 'terminar'."                    
+                    audio_response_path = text_to_speech(texto)
+                    return jsonify({
+                        "response": (
+                            "Estas son las medidas cautelares disponibles:\n\n"
+                            f"{opciones_str}\n\n"
+                            "Para seleccionar, escribe los números separados por comas (ej: '1,3'). "
+                            "Escribe 'otra' para agregar una medida no listada. "
+                            "Cuando termines, escribe 'terminar'."
+                        ),
+                        "audio_response": audio_response_path
+                    })
+                # Manejo de 'terminar' para medidas cautelares
+                if user_message == "terminar":
+                    # Verificar si se han seleccionado medidas cautelares
+                    if not datos_usuario.get("medidas_cautelares_lista"):
+                        datos_usuario["medidas_cautelares"] = "_________________________"
+                    else:
+                        texto_medidas = "\n".join(f"- {m}" for m in datos_usuario["medidas_cautelares_lista"])
+                        datos_usuario["medidas_cautelares"] = texto_medidas
+
+                    # Guardar en sesión antes de continuar
+                    session["datos_usuario"] = datos_usuario
+
+                    # Remover 'pidiendo_medidas_cautelares' de la sesión
+                    session.pop("pidiendo_medidas_cautelares", None)
+
+                    # Avanzar al siguiente dato
+                    if session.get("datos_faltantes"):
+                        session["datos_faltantes"] = session["datos_faltantes"][1:]
+                    
+                    # Verificar si aún hay datos faltantes
+                    if session["datos_faltantes"]:
+                        siguiente_dato = session["datos_faltantes"][0]
+
+                        # Definir opciones de medidas de protección
+                        opciones_str = "\n".join(f"{i+1}. {op}" for i, op in enumerate(MEDIDAS_PROTECCION_OPCIONES))
+
+                        # Ahora activar la petición de medidas de protección
+                        session["pidiendo_medidas_proteccion"] = True  # <--- NUEVA VARIABLE PARA CONTROLAR EL FLUJO
+                        texto = f"Se han registrado tus medidas cautelares. Ahora, selecciona las **medidas de protección** que solicitas para proteger tus derechos. Estas son las medidas de protección disponibles: {opciones_str}. Para seleccionar, escribe los números separados por comas (ej: '1,3'). Escribe 'otra' para agregar una medida no listada. Cuando termines, escribe 'terminar'."                    
+                        audio_response_path = text_to_speech(texto)
+                        return jsonify({
+                            "response": markdown.markdown(
+                                "✅ Se han registrado tus medidas cautelares.\n\n"
+                                "Ahora, selecciona las **medidas de protección** que solicitas para proteger tus derechos.\n\n"
+                                "Estas son las medidas de protección disponibles:\n\n"
+                                f"{opciones_str}\n\n"
+                                "Para seleccionar, escribe los números separados por comas (ej: '1,3'). "
+                                "Escribe 'otra' para agregar una medida no listada. "
+                                "Cuando termines, escribe 'terminar'."
+                            ),
+                            "audio_response": audio_response_path
+                        })
+
+                    else:
+                        # No hay más campos, generar la denuncia
+                        try:
+                            resultado = procesar_denuncia(datos_usuario)
+                            if isinstance(resultado, dict) and "error" in resultado:
+                                session["datos_faltantes"] = resultado["faltantes"]
+                                return jsonify({
+                                    "response": (f"⚠️ Faltan datos: {', '.join(resultado['faltantes'])}. "
+                                                "Por favor, ingrésalos para continuar."),
+                                    "audio_response": audio_response_path
+                                })
+                            session["pdf_path"] = resultado
+                            session.pop("datos_faltantes", None)
+                            session.pop("datos_usuario", None)
+                            texto = "La denuncia ha sido generada correctamente. Puedes descargarla en el link que te genere. Este es un formato de denuncia con los datos proporcionados. Puedes revisarlo y editarlo si lo deseas. ¡Estoy aquí para ayudarte!"
+                            audio_response_path = text_to_speech(texto)
+                            return jsonify({
+                                "response": (
+                                    "✅ La denuncia ha sido generada correctamente. "
+                                    "Puedes descargarla aquí: /download_sue\n\n"
+                                    "Este es un formato de denuncia con los datos proporcionados. "
+                                    "Puedes revisarlo y editarlo si lo deseas. "
+                                    "¡Estoy aquí para ayudarte! 😊"
+                                ),
+                                "audio_response": audio_response_path
+                            })
+                        except Exception as e:
+                            return jsonify({"response": f"❌ Error al generar la denuncia: {str(e)}"}), 500
+
+                # Manejo de 'otra'
+                if user_message == "otra":
+                    texto = "Escribe la medida cautelar adicional que deseas. Cuando termines, escribe 'terminar'."
+                    audio_response_path = text_to_speech(texto)
+                    return jsonify({
+                        "response": (
+                            "Escribe la medida cautelar adicional que deseas. "
+                            "Cuando termines, escribe 'terminar'."
+                        ),
+                        "audio_response": audio_response_path
+                    })
+
+                # Interpretar la selección
+                selecciones = [s.strip() for s in user_message.split(",")]
+                added_something = False
+
+                for sel in selecciones:
+                    if sel.isdigit():
+                        idx = int(sel) - 1
+                        if 0 <= idx < len(MEDIDAS_CAUTELARES_OPCIONES):
+                            datos_usuario["medidas_cautelares_lista"].append(MEDIDAS_CAUTELARES_OPCIONES[idx])
+                            added_something = True
+                    else:
+                        # Agregar medidas personalizadas
+                        if sel:
+                            datos_usuario["medidas_cautelares_lista"].append(sel)
+                            added_something = True
+
+                session["datos_usuario"] = datos_usuario
+                texto = "Medidas cautelares seleccionadas:\n" + "\n".join(f"- {m}" for m in datos_usuario["medidas_cautelares_lista"]) + "\n\nEscribe más números, 'otra' para añadir otra, o 'terminar' si has terminado con las medidas cautelares."
+                audio_response_path = text_to_speech(texto)
+                return jsonify({
+                    "response": (
+                        "Medidas cautelares seleccionadas:\n"
+                        + "\n".join(f"- {m}" for m in datos_usuario["medidas_cautelares_lista"])
+                        + "\n\nEscribe más números, 'otra' para añadir otra, "
+                        "o 'terminar' si has terminado con las medidas cautelares."
+                    ),
+                    "audio_response": audio_response_path
+                })
+
+            # --------------------------------
+            #  2) MEDIDAS DE PROTECCIÓN
+            # --------------------------------
+            if dato_actual == "medidas_proteccion":
+                # Si no existe la lista en datos_usuario, se crea
+                if "medidas_proteccion_lista" not in datos_usuario:
+                    datos_usuario["medidas_proteccion_lista"] = []
+
+                # Siempre mostrar la lista de opciones antes de esperar la respuesta del usuario
+                opciones_str = "\n".join(f"{i+1}. {op}" for i, op in enumerate(MEDIDAS_PROTECCION_OPCIONES))
+
+                if not session.get("pidiendo_medidas_proteccion", False):
+                    session["pidiendo_medidas_proteccion"] = True
+                    texto = f"Estas son las medidas de protección disponibles: {opciones_str}.Para seleccionar, escribe los números separados por comas (ej: '1,3').Escribe 'otra' para agregar una medida no listada. Cuando termines, escribe 'terminar'."
+                    audio_response_path = text_to_speech(texto)
+                    return jsonify({
+                        "response": (
+                            "Estas son las medidas de protección disponibles:\n\n"
+                            f"{opciones_str}\n\n"
+                            "Para seleccionar, escribe los números separados por comas (ej: '1,3'). "
+                            "Escribe 'otra' para agregar una medida no listada. "
+                            "Cuando termines, escribe 'terminar'."
+                        ),
+                        "audio_response": audio_response_path
+                    })
+
+                # Manejo de 'terminar' para medidas de protección
+                if user_message == "terminar":
+                    # Verificar si se han seleccionado medidas de protección
+                    if not datos_usuario.get("medidas_proteccion_lista"):
+                        datos_usuario["medidas_proteccion"] = "_________________________"
+                    else:
+                        texto_protecciones = "\n".join(f"- {m}" for m in datos_usuario["medidas_proteccion_lista"])
+                        datos_usuario["medidas_proteccion"] = texto_protecciones
+
+                    # Guardar en sesión antes de continuar
+                    session["datos_usuario"] = datos_usuario
+
+                    # Remover 'pidiendo_medidas_proteccion' de la sesión
+                    session.pop("pidiendo_medidas_proteccion", None)
+
+                    # Avanzar al siguiente dato si hay más pendientes
+                    if session.get("datos_faltantes"):
+                        session["datos_faltantes"] = session["datos_faltantes"][1:]
+
+                    # Verificar si aún hay datos faltantes
+                    if session["datos_faltantes"]:
+                        siguiente_dato = session["datos_faltantes"][0]
+                        texto = f"✅ Se han registrado tus medidas de protección.Ahora necesito **{siguiente_dato}**.¿Qué tipo de prueba deseas ofrecer? Elige una opción: 1️.Confesional,2️.Testimonial,3️.Documental Pública o Privada,4️.Presuncional Legal y Humana,5️.Instrumental de Actuaciones,Escribe el número de la opción que deseas elegir, o escribe 'omitir' si no deseas proporcionarlo, o 'cancelar' para salir."
+                        audio_response_path = text_to_speech(texto)
+                        return jsonify({
+                            "response": (
+                                "✅ Se han registrado tus medidas de protección.\n\n"
+                                f"Ahora necesito **{siguiente_dato}**.\n\n"
+                                "¿Qué tipo de prueba deseas ofrecer? Elige una opción:\n"
+                                "1️⃣ Confesional\n"
+                                "2️⃣ Testimonial\n"
+                                "3️⃣ Documental Pública o Privada\n"
+                                "4️⃣ Presuncional Legal y Humana\n"
+                                "5️⃣ Instrumental de Actuaciones\n\n"
+                                "Escribe el número de la opción que deseas elegir, "
+                                "o escribe 'omitir' si no deseas proporcionarlo, o 'cancelar' para salir."
+                            ),
+                            "audio_response": audio_response_path
+                        })
+                    else:
+                        # Generar denuncia
+                        try:
+                            resultado = procesar_denuncia(datos_usuario)
+                            if isinstance(resultado, dict) and "error" in resultado:
+                                session["datos_faltantes"] = resultado["faltantes"]
+                                return jsonify({
+                                    "response": (f"⚠️ Faltan datos: {', '.join(resultado['faltantes'])}. "
+                                                "Por favor, ingrésalos para continuar."),
+                                    "audio_response": audio_response_path
+                                })
+                            session["pdf_path"] = resultado
+                            session.pop("datos_faltantes", None)
+                            session.pop("datos_usuario", None)
+                            texto = "La denuncia ha sido generada correctamente. Puedes descargarla en el link que te genere. Este es un formato de denuncia con los datos proporcionados. Puedes revisarlo y editarlo si lo deseas. ¡Estoy aquí para ayudarte!"
+                            audio_response_path = text_to_speech(texto)
+                            return jsonify({
+                                "response": (
+                                    "✅ La denuncia ha sido generada correctamente. "
+                                    "Puedes descargarla aquí: /download_sue\n\n"
+                                    "Este es un formato de denuncia con los datos proporcionados. "
+                                    "Puedes revisarlo y editarlo si lo deseas. "
+                                    "¡Estoy aquí para ayudarte! 😊"
+                                ),
+                                "audio_response": audio_response_path
+                            })
+                        except Exception as e:
+                            return jsonify({"response": f"❌ Error al generar la denuncia: {str(e)}"}), 500
+
+                # Manejo de 'otra'
+                if user_message == "otra":
+                    texto = "Escribe la medida de protección adicional que deseas. Cuando termines, escribe 'terminar'."
+                    audio_response_path = text_to_speech(texto)
+                    return jsonify({
+                        "response": (
+                            "Escribe la medida de protección adicional que deseas. "
+                            "Cuando termines, escribe 'terminar'."
+                        ),
+                        "audio_response": audio_response_path
+                    })
+
+                # Interpretar la selección
+                selecciones = [s.strip() for s in user_message.split(",")]
+                added_something = False
+
+                for sel in selecciones:
+                    if sel.isdigit():
+                        idx = int(sel) - 1
+                        if 0 <= idx < len(MEDIDAS_PROTECCION_OPCIONES):
+                            datos_usuario["medidas_proteccion_lista"].append(MEDIDAS_PROTECCION_OPCIONES[idx])
+                            added_something = True
+                    else:
+                        # Agregar medidas personalizadas
+                        if sel:
+                            datos_usuario["medidas_proteccion_lista"].append(sel)
+                            added_something = True
+
+                session["datos_usuario"] = datos_usuario
+                texto = "Medidas de protección seleccionadas:" + "\n".join(f"- {m}" for m in datos_usuario["medidas_proteccion_lista"]) + "\n\nEscribe más números, 'otra' para añadir otra, o 'terminar' si has terminado con las medidas de protección."
+                audio_response_path = text_to_speech(texto)
+                return jsonify({
+                    "response": (
+                        "Medidas de protección seleccionadas:\n"
+                        + "\n".join(f"- {m}" for m in datos_usuario["medidas_proteccion_lista"])
+                        + "\n\nEscribe más números, 'otra' para añadir otra, "
+                        "o 'terminar' si has terminado con las medidas de protección."
+                    ),
+                    "audio_response": audio_response_path
+                })
+            # --------------------------------
+            #  3) PRUEBAS
+            # --------------------------------
+            if dato_actual == "tipo_prueba":
+                if "ha_preguntado_tipo_prueba" not in session:
+                    session["ha_preguntado_tipo_prueba"] = True
+                    texto = "¿Qué tipo de prueba deseas ofrecer? Elige una opción: 1️.Confesional,2️.Testimonial, 3️.Documental Pública o Privada, 4️.Presuncional Legal y Humana, 5️.Instrumental de Actuaciones, Escribe el número de la opción que deseas elegir. puedes escribir para omitir o cancelar para terminar el proceso"
+                    audio_response_path = text_to_speech(texto)
+                    return jsonify({
+                        "response": (
+                            "¿Qué tipo de prueba deseas ofrecer? Elige una opción:\n"
+                            "1️⃣ Confesional\n"
+                            "2️⃣ Testimonial\n"
+                            "3️⃣ Documental Pública o Privada\n"
+                            "4️⃣ Presuncional Legal y Humana\n"
+                            "5️⃣ Instrumental de Actuaciones\n"
+                            "Escribe el número de la opción que deseas elegir."
+                        ),
+                        "audio_response": audio_response_path
+                    })
+
+                if user_message in ["1", "2", "3", "4", "5"]:
+                    tipos_prueba = {
+                        "1": "Confesional",
+                        "2": "Testimonial",
+                        "3": "Documental Pública o Privada",
+                        "4": "Presuncional Legal y Humana",
+                        "5": "Instrumental de Actuaciones"
+                    }
+                    
+                    datos_usuario["tipo_prueba"] = tipos_prueba[user_message]
+                    session["datos_usuario"] = datos_usuario
+
+                    # **💡 IMPORTANTE: Eliminar `tipo_prueba` de `datos_faltantes`**
+                    session["datos_faltantes"] = session["datos_faltantes"][1:]
+
+                    if user_message == "1":  # Confesional
+                        session["datos_faltantes"].extend([
+                            "quien_desahoga", "numero_notarial", "notario_publico_numero", 
+                            "donde_funciones_notario", "fecha_intrumento_notarial", 
+                            "prueba_confesional", "numeros_prueba"
+                        ])
+                        return jsonify({
+                            "response": "Has seleccionado prueba confesional. ¿Quién desahoga la prueba?",
+                            "audio_response": audio_response_path
+                        })
+
+                    elif user_message == "2":  # Testimonial
+                        session["datos_faltantes"].extend([
+                            "quien_desahoga", "numero_notarial", "notario_publico_numero", 
+                            "donde_funciones_notario", "fecha_intrumento_notarial", 
+                            "prueba_testimonial", "numeros_prueba"
+                        ])
+                        return jsonify({
+                            "response": "Has seleccionado prueba testimonial. ¿Quién desahoga la prueba?",
+                            "audio_response": audio_response_path
+                        })
+
+                    elif user_message == "3":  # Documental Pública o Privada
+                        session["datos_faltantes"].extend([
+                            "documentos_oficiales", "folio", "fecha_folio", 
+                            "autoridad_emite", "acto_documento", "documento_prueba", "numeros_prueba"
+                        ])
+                        return jsonify({
+                            "response": "Has seleccionado prueba documental. ¿Cuál es el documento oficial que presentas?",
+                            "audio_response": audio_response_path
+                        })
+
+                    elif user_message in ["4", "5"]:  # Presuncional Legal y Humana o Instrumental de Actuaciones
+                        if user_message == "4":
+                            datos_usuario["tipo_prueba"] = "presuncional"
+                        else:
+                            datos_usuario["tipo_prueba"] = "instrumental"
+
+                        # **Eliminamos los datos dependientes que no aplican**
+                        datos_omitidos = [
+                            "quien_desahoga", "numero_notarial", "notario_publico_numero",
+                            "donde_funciones_notario", "fecha_intrumento_notarial",
+                            "prueba_confesional", "prueba_testimonial", "documento_prueba",
+                            "numeros_prueba","folio","fecha_folio", "documentos_oficiales"
+                        ]
+
+                        session["datos_faltantes"] = [dato for dato in session.get("datos_faltantes", []) if dato not in datos_omitidos]
+
+                        session["datos_usuario"] = datos_usuario
+
+                        # **💡 IMPORTANTE: Avanzar al siguiente campo**
+                        if session["datos_faltantes"]:
+                            siguiente_dato = session["datos_faltantes"][0]
+                            texto = f"✅ Se ha registrado tu prueba {datos_usuario['tipo_prueba']}. Ahora necesito **{siguiente_dato}**."
+                            audio_response_path = text_to_speech(texto)
+                            return jsonify({
+                                "response": markdown.markdown(f"✅ Se ha registrado tu prueba {datos_usuario['tipo_prueba']}. Ahora necesito **{siguiente_dato}**."),
+                                "audio_response": audio_response_path
+                            })
+                        else:
+                            resultado = procesar_denuncia(datos_usuario)
+                            if isinstance(resultado, dict) and "error" in resultado:
+                                session["datos_faltantes"] = resultado["faltantes"]
+                                return jsonify({
+                                    "response": f"⚠️ Faltan datos: {', '.join(resultado['faltantes'])}. Por favor, ingrésalos para continuar.",
+                                })
+                            session["pdf_path"] = resultado
+                            session.pop("datos_faltantes", None)
+                            session.pop("datos_usuario", None)
+                            texto = "La denuncia ha sido generada correctamente. Puedes descargarla en el link que te genere. Este es un formato de denuncia con los datos proporcionados. Puedes revisarlo y editarlo si lo deseas. ¡Estoy aquí para ayudarte!"
+                            audio_response_path = text_to_speech(texto)
+                            return jsonify({
+                                "response": "✅ La denuncia ha sido generada correctamente. Puedes descargarla aquí: /download_sue",
+                                "audio_response": audio_response_path
+                            })
+
+                return jsonify({
+                    "response": "Por favor, selecciona una opción válida (1-5) para el tipo de prueba."
+                })
+
+    
+            if dato_actual == "narraciones":
+                if "narraciones" not in datos_usuario:
+                    datos_usuario["narraciones"] = []
+
+                if not session.get("ejemplo_narraciones_mostrado", False):
+                    session["ejemplo_narraciones_mostrado"] = True
+                    ejemplo_narracion = (
+                        "Ejemplo de narración de hechos:\n\n"
+                        "El cinco de febrero de dos mil diecisiete, estando presentes en la oficina de XXX, "
+                        "ubicada en las calles de XXX, el denunciado me agredió verbalmente al señalar que "
+                        "no debía participar como candidata al cargo de XXXX, indicando expresamente: "
+                        "“ustedes las mujeres no sirven para esto de la política, no tienen que salir de su casa "
+                        "y deben quedarse en la cocina”.\n\n"
+                        "Con estas expresiones, se vulneran derechos como la participación política, "
+                        "la no discriminación y la vida libre de violencia.\n\n"
+                        "Por favor, ingresa tu primer relato de hechos ahora. O escribe 'omitir' si no deseas narrarlo, "
+                        "o 'cancelar' para salir."
+                    )
+                    return jsonify({"response": ejemplo_narracion})
+
+                if user_message.lower() in ["agregar", "otro"]:
+                    return jsonify({"response": "Describe el siguiente hecho. Cuando termines, escribe 'terminar' o 'agregar' si quieres más."})
+
+                if user_message.lower() == "terminar":
+                    session.pop("ejemplo_narraciones_mostrado", None)
+                    texto_final = "\n\n".join(datos_usuario["narraciones"])
+                    datos_usuario["narraciones"] = texto_final
+                    session["datos_usuario"] = datos_usuario
+                    session["datos_faltantes"] = datos_faltantes[1:]
+                    
+                    if session["datos_faltantes"]:
+                        siguiente_dato = session["datos_faltantes"][0]
+                        desc = field_info.get(dato_actual, {}).get("descripcion", "Información no disponible.")
+                        ejemp = field_info.get(dato_actual, {}).get("ejemplo", "Ejemplo no disponible.")
+                        texto = f"Se han registrado tus narraciones. Ahora necesitamos **{siguiente_dato}**, {desc}. un ejemplo de como llenarlo seria: {ejemp}. ¿Podrías proporcionarlo ahora?. Si no deseas darlo, escribe 'omitir', o 'cancelar'."
+                        audio_response_path = text_to_speech(texto)
+                        return jsonify({
+                            "response": markdown.markdown(
+                                "✅ Se han registrado tus narraciones.\n\n"
+                                f"Ahora necesitamos **{siguiente_dato}**, {desc}.\n\n"
+                                f"{ejemp}\n\n"
+                                "¿Podrías proporcionarlo ahora? "
+                                "Si no deseas darlo, escribe 'omitir', o 'cancelar'."
+                            ),
+                            "audio_response": audio_response_path
+                        })
+                    else:
+                        # Generar denuncia
+                        try:
+                            resultado = procesar_denuncia(datos_usuario)
+                            if isinstance(resultado, dict) and "error" in resultado:
+                                session["datos_faltantes"] = resultado["faltantes"]
+                                return jsonify({
+                                    "response":markdown.markdown(f"⚠️ Faltan datos: {', '.join(resultado['faltantes'])}. "
+                                                 "Por favor, ingrésalos para continuar.")
+                                })
+                            session["pdf_path"] = resultado
+                            session.pop("datos_faltantes", None)
+                            session.pop("datos_usuario", None)
+                            texto = "La denuncia ha sido generada correctamente. Puedes descargarla en el link que te genere. Este es un formato de denuncia con los datos proporcionados. Puedes revisarlo y editarlo si lo deseas. ¡Estoy aquí para ayudarte!"
+                            audio_response_path = text_to_speech(texto)
+                            return jsonify({
+                                "response": markdown.markdown(
+                                    "✅ La denuncia ha sido generada correctamente. "
+                                    "Puedes descargarla aquí: /download_sue\n\n"
+                                    "Este es un formato de denuncia con los datos que me proporcionaste. "
+                                    "Si deseas, puedes revisarlo y editarlo si lo consideras necesario. "
+                                    "¡Estoy para ayudarte! 😊"
+                                ),
+                                "audio_response": audio_response_path
+                            })
+                        except Exception as e:
+                            return jsonify({
+                                "response": f"❌ Error al generar la denuncia: {str(e)}"
+                            }), 500
+
+                if not es_narracion_valida(user_message):
+                    return jsonify({"response": "⚠️ Tu narración parece muy corta o inválida..."})
+
+                # Nuevo prompt modificado
+                narraciones_prompt = f"""
+                Eres un validador de narrativas de violencia política. Evalúa si el texto cumple:
+                1. Fecha concreta (ej: 5 de febrero de 2023)
+                2. Lugar identificable (ej: oficina de X en calle Y)
+                3. Cita textual o descripción específica de los hechos
+                4. Menciona al menos un derecho vulnerado
+
+                Texto a validar: "{user_message}"
+
+                Responde SOLO con:
+                - "se ha registrado narraciones" si cumple TODOS los requisitos
+                - Explicación de faltas y ejemplo de mejora si no cumple
+                """
+
+                completion_llm = client.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[{"role": "system", "content": narraciones_prompt}],
+                    temperature=0  # Para mayor precisión
+                )
+                
+                bot_ans = completion_llm.choices[0].message.content if completion_llm.choices else ""
+                clean_ans = bot_ans.replace("*", "").replace("✅", "").strip().lower()
+
+                if "se ha registrado narraciones" in clean_ans:
+                    datos_usuario["narraciones"].append(user_message.strip())
+                    session["datos_usuario"] = datos_usuario
+                    texto = "Narración agregada. ¿Deseas **agregar** otro hecho o **terminar**?"
+                    audio_response_path = text_to_speech(texto)
+                    return jsonify({
+                        "response": markdown.markdown(
+                            "✅ Narración agregada.\n\n"
+                            "¿Deseas **agregar** otro hecho o **terminar**?"
+                        ),
+                        "audio_response": audio_response_path
+                    })
+                else:
+                    return jsonify({"response": bot_ans})
+            # -------------------------------------------------------------------
+            # 2) Validación del dato ingresado con el LLM (código existente)
+            # -------------------------------------------------------------------
+            validation_func = VALIDATION_RULES.get(dato_actual)
+            if validation_func:
+                if not validation_func(user_message):
+                    # ❌ Valor claramente inválido
+                    return jsonify({
+                        "response": markdown.markdown(
+                            f"⚠️ El valor **{user_message}** no es válido para **{dato_actual}** "
+                            f"según las reglas mínimas. Inténtalo de nuevo, "
+                            "escribe 'omitir' para dejarlo vacío, o 'cancelar' para salir."
+                        ),
+                        "audio_response": audio_response_path
+                    })
+            desc = field_info.get(dato_actual, {}).get("descripcion", "Información no disponible.")
+            ejemp = field_info.get(dato_actual, {}).get("ejemplo", "Ejemplo no disponible.")
+            full_prompt = f"""
+            {SYSTEM_PROMPT}
+            ### Instrucciones para el LLM:
+            1. El usuario está llenando un **formato de denuncia** y debe ingresar el siguiente dato: **{dato_actual}**.
+            2. Aplica las reglas de validación de abajo (según el campo).  
+            - **Si** el dato es válido, responde con la frase exacta: "**se ha registrado {dato_actual}**".
+            - **Si** es inválido:
+                - Explica por qué no es válido (formato, longitud, etc.).
+                - Da un ejemplo correcto.
+                - Pídele que lo ingrese de nuevo (no usar la frase "se ha registrado").
+                - **No** avances al siguiente campo.
+            3. Si el usuario escribe "omitir", deja este dato en blanco y pasa al siguiente.
+            4. Si el usuario escribe "cancelar", se cancela el proceso.
+            5. No avances ni confirmes el dato hasta que sea realmente válido.
+
+            ### Reglas de validación (ejemplo):
+            - **nombre_completo**  
+            - Al menos 2 palabras (ej.: "María Pérez").  
+            - No puede ser solo números ni un nombre incompleto.  
+            - **telefono**  
+            - Solo dígitos (0-9).  
+            - Longitud mínima 7 (ej.: "5523456789").  
+            - **correo**  
+            - Debe contener '@' y un dominio (ej.: "ejemplo@dominio.com").  
+            ##
+            ### Contexto:
+            - **Dato solicitado:** {dato_actual}
+            - **Valor ingresado por el usuario:** "{user_message}"
+
+            Explica por qué este dato es importante en el proceso de denuncia.  
+            Si el usuario pide omitir o cancelar, respeta esa decisión.  
+
+            """
+
+
+            messages = session["messages"]
+            messages.append({"role": "user", "content": user_message})
+
+            completion = client.chat.completions.create(
+                model="gpt-4-turbo",
+                messages=[{"role": "system", "content": full_prompt}] + messages,
+                max_tokens=500
+            )
+            bot_response = (completion.choices[0].message.content
+                            if completion.choices else "No se pudo obtener una respuesta clara.")
+
+            # Persistimos la conversación
+            session["messages"] = messages
+
+            # ¿el LLM confirma que el dato es válido?
+            if any(frase in bot_response.lower() for frase in [
+                "dato registrado", "se ha registrado", "ha sido guardado",
+                "válido", "correcto", "registrado"]):   
+                datos_usuario[dato_actual] = user_message.strip()
+                session["datos_usuario"] = datos_usuario
+                session["datos_faltantes"] = datos_faltantes[1:]
+
+                if session["datos_faltantes"]:
+                    siguiente_dato = session["datos_faltantes"][0]
+                    desc = field_info.get(siguiente_dato, {}).get("descripcion", "Información no disponible.")
+                    ejemp = field_info.get(siguiente_dato, {}).get("ejemplo", "Ejemplo no disponible.")
+                    texto = f"se ha registrado **{dato_actual}**. El siguiente dato es **{siguiente_dato}**, que sirve {desc}. {ejemp},¿Podrías proporcionarlo?"
+                    audio_response_path = text_to_speech(texto)
+                    return jsonify({
+                        "response": markdown.markdown(
+                            f"✅ Se ha registrado **{dato_actual}**.\n\n"
+                            f"El siguiente dato es **{siguiente_dato}**, "
+                            f"que sirve {desc}.\n\n"
+                            f"{ejemp}\n\n"
+                            "¿Podrías proporcionarlo?"
+                        ),
+                        "audio_response": audio_response_path
+                    })
+                else:
+                    # Generar denuncia
+                    try:
+                        resultado = procesar_denuncia(datos_usuario)
+                        
+                        if isinstance(resultado, dict) and "error" in resultado:
+                            session["datos_faltantes"] = resultado["faltantes"]
+                            texto = f"⚠️ Faltan datos: {', '.join(resultado['faltantes'])}. Por favor, ingrésalos para continuar."
+                            audio_response_path = text_to_speech(texto)
+                            return jsonify({
+                                "response": (f"⚠️ Faltan datos: {', '.join(resultado['faltantes'])}. "
+                                             "Por favor, ingrésalos para continuar."),
+                                "audio_response": audio_response_path
+                            })
+
+                        session["pdf_path"] = resultado
+                        session.pop("datos_faltantes", None)
+                        session.pop("datos_usuario", None)
+                        texto = "La denuncia ha sido generada correctamente. Puedes descargarla en el link que te genere. Este es un formato de denuncia con los datos proporcionados. Puedes revisarlo y editarlo si lo deseas. ¡Estoy aquí para ayudarte!"
+                        audio_response_path = text_to_speech(texto)
+                        return jsonify({
+                            "response": (
+                                "✅ La denuncia ha sido generada correctamente. "
+                                "Puedes descargarla aquí: /download_sue\n\n"
+                                "Este es un formato de denuncia con los datos proporcionados. "
+                                "Puedes revisarlo y editarlo si lo deseas. "
+                                "¡Estoy aquí para ayudarte! 😊"
+                            ),
+                            "audio_response": audio_response_path
+                        })
+                    except Exception as e:
+                        return jsonify({
+                            "response": f"❌ Error al generar la denuncia: {str(e)}"
+                        }), 500
+
+            # Si el LLM no confirma, devolvemos la respuesta para que el usuario corrija
+            return jsonify({"response": bot_response})
+
+        # -----------------------------------------------------------------------
+        # 2) Si NO se está llenando datos, revisamos si el usuario quiere iniciar denuncia
+        # -----------------------------------------------------------------------
+        frases_activadoras = [
+            "quiero hacer una denuncia",
+            "necesito denunciar",
+            "quiero denunciar"
+        ]
+        user_message_clean = re.sub(r"[^\w\s]", "", user_message.lower()).strip()
+        if user_message_clean in frases_activadoras:
+            session["awaiting_decision"] = True
+            texto = "🔍 ¿Qué deseas hacer?. 1️.**📄 Iniciar el proceso de denuncia.**,2️.**🧠 Recibir orientación antes de denunciar.** Escribe '1' para iniciar la denuncia o '2' para orientación."
+            audio_response_path = text_to_speech(texto)
+            return jsonify({
+                "response": markdown.markdown(
+                    "🔍 ¿Qué deseas hacer?\n\n"
+                    "1️⃣ **📄 Iniciar el proceso de denuncia.**\n"
+                    "2️⃣ **🧠 Recibir orientación antes de denunciar.**\n\n"
+                    "Escribe '1' para iniciar la denuncia o '2' para orientación."
+                ),
+                "audio_response": audio_response_path
+            })
+
+        # 2.1) Manejo de la decisión
+        if session.get("awaiting_decision"):
+            if user_message in respuestas_proceder or user_message == "1":
+                session.pop("awaiting_decision", None)
+                # Aquí definimos la lista COMPLETA de campos faltantes
+                session["datos_faltantes"] = LISTA_CAMPOS_DENUNCIA.copy()
+                session["datos_usuario"] = {}
+
+                primer_dato = session["datos_faltantes"][0]
+                texto = f"Perfecto, iniciaremos la denuncia. A continuación te mostraré la lista de datos que necesitaremos y por qué son importantes: 1.Nombre completo: Para identificar formalmente a la persona que presenta la denuncia. 2.Teléfono Un medio de contacto para resolver dudas o enviar notificaciones. 3.Domicilio: Tu dirección oficial, necesaria en algunos trámites legales. 4.Correo Para envío de notificaciones y seguimiento digital. 5.Personas autorizadas: Si deseas que alguien más reciba notificaciones o te ayude en el proceso. 6.Fecha de los hechos: El día en que ocurrieron los hechos que denuncias. 7.Lugar de los hechos: Dónde sucedieron esos hechos. 8.Ciudad: Ubicación general para contextualizar lo ocurrido. 9.Persona denunciada: Nombre completo de la persona a quien diriges la denuncia. 10.Relación con la persona denunciada: Si es familiar, colega, etc. 11.Narración de los hechos: Descripción detallada de lo que ocurrió. 12.Afectación: Cómo te impactaron estos hechos. 13.Medidas cautelares: Acciones urgentes que solicitas para proteger tus derechos. 14.Protección: Medidas adicionales de protección que consideras necesarias.15.Pruebas: Testimonios, documentos u otras evidencias que respalden la denuncia. Te iré solicitando estos datos uno por uno. Puedes omitir un dato si no lo deseas proporcionar, o escribir cancelar para detener el proceso en cualquier momento. Para comenzar, por favor, indícame {primer_dato}."
+                audio_response_path = text_to_speech(texto)
+                respuesta = (
+                        "Perfecto, iniciaremos la denuncia. A continuación te mostraré la lista "
+                        "de datos que necesitaremos y por qué son importantes:\n"
+                        
+                        "1. **Nombre completo**: Para identificar formalmente a la persona que presenta la denuncia.\n"
+                        "2. **Teléfono**: Un medio de contacto para resolver dudas o enviar notificaciones.\n"
+                        "3. **Domicilio**: Tu dirección oficial, necesaria en algunos trámites legales.\n"
+                        "4. **Correo**: Para envío de notificaciones y seguimiento digital.\n"
+                        "5. **Personas autorizadas**: Si deseas que alguien más reciba notificaciones o te ayude en el proceso.\n"
+                        "6. **Fecha de los hechos**: El día en que ocurrieron los hechos que denuncias.\n"
+                        "7. **Lugar de los hechos**: Dónde sucedieron esos hechos.\n"
+                        "8. **Ciudad**: Ubicación general para contextualizar lo ocurrido.\n"
+                        "9. **Persona denunciada**: Nombre completo de la persona a quien diriges la denuncia.\n"
+                        "10. **Relación con la persona denunciada**: Si es familiar, colega, etc.\n"
+                        "11. **Narración de los hechos**: Descripción detallada de lo que ocurrió.\n"
+                        "12. **Afectación**: Cómo te impactaron estos hechos.\n"
+                        "13. **Medidas cautelares**: Acciones urgentes que solicitas para proteger tus derechos.\n"
+                        "14. **Protección**: Medidas adicionales de protección que consideras necesarias.\n"
+                        "15. **Pruebas**: Testimonios, documentos u otras evidencias que respalden la denuncia.\n"
+
+                        "Te iré solicitando estos datos uno por uno. Puedes **omitir** un dato si no "
+                        "lo deseas proporcionar, o escribir **cancelar** para detener el proceso en cualquier momento.\n"
+                        
+                        f"Para comenzar, por favor, indícame **{primer_dato}**."
+                    )
+                respuesta_html = markdown.markdown(respuesta)
+                return jsonify({
+                    "response": respuesta_html,
+                    "audio_response": audio_response_path
+                })
+
+            elif user_message in respuestas_no or user_message == "2":
+                # El usuario quiere orientación antes de denunciar
+                session["awaiting_orientation_response"] = True
+                session.pop("awaiting_decision", None)
+
+                messages = session["messages"]
+                messages.append({"role": "user", "content": "¿Cómo puedo presentar una denuncia?"})
+
+                completion = client.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+                    max_tokens=500
+                )
+
+                bot_response = (completion.choices[0].message.content
+                                if completion.choices else "No se pudo obtener una respuesta clara.")
+
+                # Persistimos mensajes
+                session["messages"] = messages
+                texto = bot_response + "\n\n🔹 **¿Te puedo ayudar en algo más?**"
+                audio_response_path = text_to_speech(bot_response)
+                
+                return jsonify({
+                    "response": bot_response + "\n\n🔹 **¿Te puedo ayudar en algo más?**",
+                    "audio_response": audio_response_path
+                })
+
+        # -----------------------------------------------------------------------
+        # 3) Chat general si no se ha iniciado o no se está en proceso de denuncia
+        # -----------------------------------------------------------------------
+        messages = session["messages"]
+        messages.append({"role": "user", "content": user_message})
+
+        completion = client.chat.completions.create(
+            model="gpt-4-turbo",
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+            max_tokens=500
+        )
+        bot_response = (completion.choices[0].message.content 
+                        if completion.choices else "")
+
+        # Actualizar 'messages'
+        session["messages"] = messages
+
+        # Manejo de respuestas vagas
+        vague_responses = ["no estoy seguro", "no tengo información", "no puedo responder"]
+        if any(vague in bot_response.lower() for vague in vague_responses):
+            retrieved_context = search_in_pdfs(user_message)
+            if retrieved_context:
+                full_prompt = f"""
+                {SYSTEM_PROMPT}
+                El usuario ha preguntado: "{user_message}"
+                No se encontró una respuesta clara, pero aquí hay información relevante:
+                {retrieved_context}
+                Responde de manera clara y útil utilizando esta información.
+                """
+                completion = client.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[{"role": "system", "content": full_prompt}] + messages,
+                    max_tokens=500
+                )
+                bot_response = (completion.choices[0].message.content 
+                                if completion.choices else "No se pudo obtener una respuesta clara.")
+
+        bot_response_html = markdown.markdown(bot_response)
+        audio_response_path = text_to_speech(bot_response)
+        return jsonify({
+            "response": bot_response_html,
+            "audio_response": audio_response_path
+        })
+    except Exception as e:
+        return jsonify({"response": f"Error: {str(e)}"}), 500
