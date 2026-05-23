@@ -1,11 +1,15 @@
 from flask import jsonify, session
 from flask_session import Session
+import asyncio
 import os
+import uuid
+import edge_tts
 import gtts  # Google Text-to-Speech
 from pydub import AudioSegment
 from formato_denuncia import procesar_denuncia
 import markdown
 import re
+import requests
 
 
 
@@ -17,13 +21,111 @@ import re
 AUDIO_OUTPUT_FOLDER = "static/audio"
 os.makedirs(AUDIO_OUTPUT_FOLDER, exist_ok=True)
 
+_elevenlabs_voice_cache = {"name": None, "id": None}
+
+
+def _get_elevenlabs_api_key():
+    return (
+        os.getenv("ELEVENLABS_API_KEY")
+        or os.getenv("XI_API_KEY")
+        or os.getenv("ELEVEN_API_KEY")
+    )
+
+
+def _resolve_elevenlabs_voice_id(api_key):
+    explicit_voice_id = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
+    if explicit_voice_id:
+        return explicit_voice_id
+
+    voice_name = os.getenv("ELEVENLABS_VOICE_NAME", "Ninoska - Spanish Teacher").strip()
+    cached_name = _elevenlabs_voice_cache.get("name")
+    cached_id = _elevenlabs_voice_cache.get("id")
+    if cached_id and cached_name == voice_name:
+        return cached_id
+
+    base_url = os.getenv("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io").rstrip("/")
+    response = requests.get(
+        f"{base_url}/v1/voices",
+        headers={"xi-api-key": api_key},
+        timeout=20,
+    )
+    response.raise_for_status()
+
+    voices = response.json().get("voices", [])
+    normalized_target = voice_name.lower()
+    for voice in voices:
+        if voice.get("name", "").strip().lower() == normalized_target:
+            voice_id = voice.get("voice_id")
+            if voice_id:
+                _elevenlabs_voice_cache["name"] = voice_name
+                _elevenlabs_voice_cache["id"] = voice_id
+                return voice_id
+
+    return None
+
+
+def _text_to_speech_elevenlabs(text, filepath):
+    api_key = _get_elevenlabs_api_key()
+    if not api_key:
+        return False
+
+    voice_id = _resolve_elevenlabs_voice_id(api_key)
+    if not voice_id:
+        return False
+
+    base_url = os.getenv("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io").rstrip("/")
+    model_id = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
+    stability = float(os.getenv("ELEVENLABS_STABILITY", "0.45"))
+    similarity = float(os.getenv("ELEVENLABS_SIMILARITY_BOOST", "0.85"))
+    style = float(os.getenv("ELEVENLABS_STYLE", "0.2"))
+
+    payload = {
+        "text": text,
+        "model_id": model_id,
+        "output_format": "mp3_44100_128",
+        "voice_settings": {
+            "stability": stability,
+            "similarity_boost": similarity,
+            "style": style,
+            "use_speaker_boost": True,
+        },
+    }
+
+    response = requests.post(
+        f"{base_url}/v1/text-to-speech/{voice_id}",
+        headers={
+            "xi-api-key": api_key,
+            "Accept": "audio/mpeg",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=60,
+    )
+    response.raise_for_status()
+
+    with open(filepath, "wb") as audio_file:
+        audio_file.write(response.content)
+
+    return True
+
 def text_to_speech(text):
-    """Genera un archivo de audio a partir del texto usando gTTS"""
-    filename = f"response_{hash(text)}.mp3"
+    """Genera un archivo de audio con voz femenina en español."""
+    filename = f"response_{uuid.uuid4().hex}.mp3"
     filepath = os.path.join(AUDIO_OUTPUT_FOLDER, filename)
 
-    tts = gtts.gTTS(text, lang="es")  # Generar audio en español
-    tts.save(filepath)
+    try:
+        if _text_to_speech_elevenlabs(text, filepath):
+            return f"/{filepath}"
+    except Exception as ex:
+        print(f"⚠️ ElevenLabs TTS falló, usando fallback local: {ex}")
+
+    try:
+        voice = os.getenv("TTS_VOICE", "es-MX-DaliaNeural")
+        communicate = edge_tts.Communicate(text, voice=voice, rate="-2%", pitch="+2Hz")
+        asyncio.run(communicate.save(filepath))
+    except Exception:
+        tts = gtts.gTTS(text, lang="es", tld="com.mx")
+        tts.save(filepath)
 
     return f"/{filepath}"  # Retorna la URL relativa del archivo
 

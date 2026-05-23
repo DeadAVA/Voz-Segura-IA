@@ -1,68 +1,49 @@
-/* Contenedor de bienvenida */
 .welcome-container {
-    flex-grow: 1;
     display: flex;
-    flex-direction: column;
-    justify-content: center;
+    width: 100%;
+    min-height: 0;
     align-items: center;
+    justify-content: center;
+    padding: 22px;
+}
+
+.welcome-content {
+    width: min(690px, 100%);
+    margin-top: -30px;
+}
+
+.welcome-content h1 {
+    margin: 0 0 32px;
+    color: #050505;
+    font-size: clamp(2rem, 4vw, 2.05rem);
+    font-weight: 700;
+    line-height: 1.2;
     text-align: center;
-    width: calc(100% - 250px); /* Ajuste para evitar que se mueva */
-    height: 100vh;
-    transition: opacity 0.3s ease, transform 0.3s ease;
-}
-/* Mensaje de bienvenida */
-.welcome-container p {
-    font-size: 1.5rem;
-    color: #4A0072;
-    font-weight: 600;
+    letter-spacing: 0;
 }
 
-/* Estilo mejorado del input-container */
-.input-container2 {
-    width: 90%;
-    max-width: 600px;
-    display: flex;
-    align-items: center;
-    background: #fff;
-    border-radius: 30px;
-    padding: 10px;
-    box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.1);
-    transition: all 0.3s ease-in-out;
+.welcome-copy {
+    margin: -20px auto 24px;
+    color: #6f667d;
+    text-align: center;
 }
 
-/* Input más limpio */
-#welcomeInput {
-    flex-grow: 1;
-    border: none;
-    padding: 12px;
-    border-radius: 30px;
-    font-size: 16px;
-    outline: none;
-    resize: none;
-    background: transparent;
-    color: #4A0072;
+.disclaimer {
+    width: min(690px, 100%);
+    margin: 8px auto 0;
 }
 
-/* Botón de enviar */
-#welcomeSendButton {
-    width: 45px;
-    height: 45px;
-    border-radius: 50%;
-    background-color: #7D3CB0;
-    color: white;
-    border: none;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: background 0.3s ease;
-}
+@media (max-width: 768px) {
+    .welcome-container {
+        padding: 22px 12px 120px;
+    }
 
-#welcomeSendButton:hover {
-    background-color: #9E5FCD;
-    transform: scale(1.1);
-}
+    .welcome-content {
+        margin-top: -20px;
+    }
 
-/* Icono dentro del botón */
-#welcomeSendButton i {
-    font-size: 18px;
+    .welcome-content h1 {
+        margin-bottom: 26px;
+        font-size: 1.85rem;
+    }
 }

@@ -1,9 +1,8 @@
 from flask import Flask, request, render_template, jsonify, session, send_file
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
-from sentence_transformers import SentenceTransformer
 from langchain_community.vectorstores import FAISS
-from langchain_openai import OpenAIEmbeddings
+from langchain_core.embeddings import Embeddings
 from formato_denuncia import procesar_denuncia
 from werkzeug.utils import secure_filename
 from funciones_auxiliares import *
@@ -13,12 +12,39 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import threading
 import glob
+import time
 import markdown
 import os
+import requests
+import re
+import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
 
 # Cargar variables de entorno
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "qwen2.5:14b")
+EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text-v2-moe")
+EMBEDDING_BATCH_SIZE = int(os.getenv("OLLAMA_EMBEDDING_BATCH_SIZE", "32"))
+PDF_CHUNK_SIZE = int(os.getenv("PDF_CHUNK_SIZE", "1600"))
+PDF_CHUNK_OVERLAP = int(os.getenv("PDF_CHUNK_OVERLAP", "150"))
+PRELOAD_INDEX = os.getenv("PRELOAD_INDEX", "false").strip().lower() in ("1", "true", "yes", "si")
+AUTO_PULL_OLLAMA_MODELS = os.getenv("AUTO_PULL_OLLAMA_MODELS", "true").strip().lower() in ("1", "true", "yes", "si")
+OLLAMA_PULL_TIMEOUT = int(os.getenv("OLLAMA_PULL_TIMEOUT", "1800"))
+
+if LLM_PROVIDER == "ollama":
+    client = OpenAI(api_key="ollama", base_url=f"{OLLAMA_BASE_URL}/v1")
+else:
+    CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4-turbo")
+    EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
 db_lock = threading.Lock()  # Evita condiciones de carrera en multi-threading
 db = None  # Global para almacenar FAISS
 
@@ -28,7 +54,8 @@ app.secret_key = os.getenv("SECRET_KEY")
 # Carpeta donde están los documentos PDF
 PDF_FOLDER = "static/pdfs"
 AUDIO_FOLDER = "uploads/audio"
-INDEX_PATH = "faiss_index"  # Nombre del archivo donde guardaremos el índice
+safe_embedding_model = EMBEDDING_MODEL.replace(":", "_").replace("/", "_").replace("-", "_")
+INDEX_PATH = os.getenv("FAISS_INDEX_PATH", f"faiss_index_{safe_embedding_model}")
 os.makedirs(AUDIO_FOLDER, exist_ok=True)  # Crear la carpeta si no existe
 
 app.config["SESSION_TYPE"] = "filesystem"  # Tipo de sesión en archivos
@@ -37,8 +64,40 @@ app.config["SESSION_FILE_DIR"] = "./flask_sessions"
 
 Session(app)  # Ahora se inicializa correctamente
 
-# Cargar modelo de embeddings
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+class OllamaEmbeddings(Embeddings):
+    """Embeddings locales con Ollama para FAISS."""
+
+    def __init__(self, model=EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL):
+        self.model = model
+        self.base_url = base_url
+
+    def _embed_batch(self, texts, prefix):
+        response = requests.post(
+            f"{self.base_url}/api/embed",
+            json={"model": self.model, "input": [f"{prefix}{text}" for text in texts]},
+            timeout=120,
+        )
+        response.raise_for_status()
+        return response.json()["embeddings"]
+
+    def embed_documents(self, texts):
+        embeddings = []
+        total = len(texts)
+        for start in range(0, total, EMBEDDING_BATCH_SIZE):
+            batch = texts[start:start + EMBEDDING_BATCH_SIZE]
+            embeddings.extend(self._embed_batch(batch, "search_document: "))
+            print(f"🧠 Embeddings Ollama: {min(start + len(batch), total)}/{total}")
+        return embeddings
+
+    def embed_query(self, text):
+        return self._embed_batch([text], "search_query: ")[0]
+
+
+def get_embeddings():
+    if LLM_PROVIDER == "ollama":
+        return OllamaEmbeddings()
+    from langchain_openai import OpenAIEmbeddings
+    return OpenAIEmbeddings(model=EMBEDDING_MODEL)
 
 respuestas_proceder = ["proceder", "iniciar", "vamos", "sí", "si", "ok", "1"]
 respuestas_no = ["no", "2", "cancelar", "omitir"]
@@ -75,7 +134,7 @@ def load_or_create_index():
     if index_files:
         print("🔄 Cargando índice FAISS desde disco...")
         try:
-            db_instance = FAISS.load_local(INDEX_PATH, OpenAIEmbeddings(), allow_dangerous_deserialization=True)
+            db_instance = FAISS.load_local(INDEX_PATH, get_embeddings(), allow_dangerous_deserialization=True)
             if db_instance is not None:
                 return db_instance
         except Exception as e:
@@ -90,14 +149,14 @@ def load_or_create_index():
         return None  # Evita errores si no hay documentos
 
     # 📝 Dividir documentos solo si hay documentos PDF cargados
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=PDF_CHUNK_SIZE, chunk_overlap=PDF_CHUNK_OVERLAP)
     split_docs = text_splitter.split_documents(pdf_documents)
 
     print(f"📌 Se generaron {len(split_docs)} fragmentos de texto para indexar.")
 
     # 🔹 Crear FAISS solo si hay fragmentos de texto
     if split_docs:
-        db_instance = FAISS.from_documents(split_docs, OpenAIEmbeddings())
+        db_instance = FAISS.from_documents(split_docs, get_embeddings())
         db_instance.save_local(INDEX_PATH)
         print(f"✅ Índice FAISS guardado en {INDEX_PATH}")
         return db_instance
@@ -105,7 +164,6 @@ def load_or_create_index():
         print("❌ No se pudieron generar fragmentos de texto. Verifica los documentos PDF.")
         return None
 
-db = load_or_create_index()
 
 # Búsqueda en los documentos PDF
 def search_in_pdfs(query, top_k=3):
@@ -123,6 +181,137 @@ def search_in_pdfs(query, top_k=3):
         print(f"❌ Error en búsqueda FAISS: {str(e)}")
         return "⚠️ Error al buscar en los documentos."
 
+
+def ollama_installed_models():
+    """Retorna el conjunto de modelos instalados en Ollama."""
+    response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=20)
+    response.raise_for_status()
+    data = response.json()
+    models = data.get("models", [])
+    names = set()
+    for model in models:
+        name = (model or {}).get("name")
+        if name:
+            names.add(name)
+    return names
+
+
+def ollama_pull_model(model_name):
+    """Descarga un modelo en Ollama usando su API de pull."""
+    print(f"⬇️ Descargando modelo Ollama faltante: {model_name}")
+    response = requests.post(
+        f"{OLLAMA_BASE_URL}/api/pull",
+        json={"name": model_name, "stream": False},
+        timeout=OLLAMA_PULL_TIMEOUT,
+    )
+    response.raise_for_status()
+    print(f"✅ Modelo Ollama listo: {model_name}")
+
+
+def ensure_ollama_models_ready():
+    """Verifica modelos requeridos y hace pull automático de los faltantes."""
+    if LLM_PROVIDER != "ollama":
+        return
+    if not AUTO_PULL_OLLAMA_MODELS:
+        print("ℹ️ AUTO_PULL_OLLAMA_MODELS desactivado; omitiendo verificación de modelos.")
+        return
+
+    required_models = [CHAT_MODEL, EMBEDDING_MODEL]
+    try:
+        installed = ollama_installed_models()
+    except Exception as ex:
+        print(f"⚠️ No se pudo consultar Ollama (/api/tags): {ex}")
+        print("⚠️ La app continuará, pero fallará si los modelos no están disponibles.")
+        return
+
+    for model_name in required_models:
+        if model_name in installed:
+            print(f"✅ Modelo detectado: {model_name}")
+            continue
+        try:
+            ollama_pull_model(model_name)
+        except Exception as ex:
+            print(f"❌ No se pudo descargar el modelo {model_name}: {ex}")
+            print("❌ Verifica que Ollama esté corriendo y que el nombre del modelo sea correcto.")
+            raise
+
+
+QUALITY_FALLBACK_PHRASES = [
+    "no estoy seguro",
+    "no tengo información",
+    "no puedo responder",
+    "como modelo de lenguaje",
+    "no cuento con",
+]
+
+QUALITY_TOPIC_KEYWORDS = {
+    "denuncia", "violencia", "politica", "mujeres", "genero", "derechos",
+    "electoral", "victima", "ine", "normatividad", "medidas", "cautelares",
+}
+
+
+def is_low_quality_response(user_text, bot_response):
+    user_lower = (user_text or "").lower()
+    bot_lower = (bot_response or "").lower()
+
+    if any(trigger in bot_lower for trigger in QUALITY_FALLBACK_PHRASES):
+        return True
+
+    user_topics = {kw for kw in QUALITY_TOPIC_KEYWORDS if kw in user_lower}
+    if user_topics:
+        covered = {kw for kw in user_topics if kw in bot_lower}
+        if not covered:
+            return True
+
+    if len((bot_response or "").strip()) < 40:
+        return True
+
+    return False
+
+
+def generate_grounded_reply(user_text, messages, strict=False, previous_answer=""):
+    retrieved_context = search_in_pdfs(user_text, top_k=4)
+    has_context = bool(retrieved_context) and "⚠️" not in retrieved_context
+    context_block = retrieved_context if has_context else "No se recuperó contexto documental específico."
+
+    quality_instructions = (
+        "Responde en español, con tono claro, empático y dirigido a una usuaria. "
+        "Mantente estrictamente en el tema de la consulta y evita respuestas genéricas. "
+        "Si falta contexto, dilo con honestidad y pide 1 o 2 datos de aclaración."
+    )
+
+    if strict:
+        quality_instructions += (
+            " La respuesta anterior fue poco enfocada; corrige eso ahora. "
+            "No repitas frases vagas. Entrega una respuesta concreta en 3 partes: "
+            "(1) respuesta directa, (2) pasos prácticos, (3) recursos oficiales útiles."
+        )
+
+    quality_prompt = f"""
+{SYSTEM_PROMPT}
+
+### Refuerzo de calidad
+{quality_instructions}
+
+### Consulta de la usuaria
+"{user_text}"
+
+### Contexto documental recuperado
+{context_block}
+
+### Respuesta anterior (si aplica)
+{previous_answer or 'N/A'}
+"""
+
+    completion = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[{"role": "system", "content": quality_prompt}] + messages,
+        max_tokens=600,
+    )
+
+    bot_response = completion.choices[0].message.content if completion.choices else "No se pudo obtener una respuesta clara."
+    return bot_response
+
 @app.route("/reload_index", methods=["POST"])
 def reload_index():
     """Permite regenerar el índice FAISS manualmente sin reiniciar Flask"""
@@ -133,23 +322,80 @@ def reload_index():
     
     return jsonify({"message": "Índice FAISS regenerado correctamente."})
 
+def pdf_info(path):
+    stat = os.stat(path)
+    return {
+        "name": os.path.basename(path),
+        "size": stat.st_size,
+        "modified": int(stat.st_mtime),
+        "url": "/" + path.replace("\\", "/"),
+    }
+
+
+@app.route("/api/library", methods=["GET"])
+def api_library():
+    os.makedirs(PDF_FOLDER, exist_ok=True)
+    files = [
+        pdf_info(os.path.join(PDF_FOLDER, filename))
+        for filename in os.listdir(PDF_FOLDER)
+        if filename.lower().endswith(".pdf")
+    ]
+    files.sort(key=lambda item: item["modified"], reverse=True)
+    return jsonify({"files": files})
+
+
+@app.route("/api/library/upload", methods=["POST"])
+def api_library_upload():
+    if "files" not in request.files:
+        return jsonify({"error": "No se enviaron archivos."}), 400
+
+    os.makedirs(PDF_FOLDER, exist_ok=True)
+    uploaded = []
+    for file in request.files.getlist("files"):
+        if not file.filename:
+            continue
+        if not file.filename.lower().endswith(".pdf"):
+            return jsonify({"error": "Solo se permiten archivos PDF."}), 400
+        filename = secure_filename(file.filename)
+        path = os.path.join(PDF_FOLDER, filename)
+        file.save(path)
+        uploaded.append(pdf_info(path))
+
+    global db
+    with db_lock:
+        db = None
+
+    return jsonify({
+        "message": "Archivos cargados. El indice se regenerara en la siguiente busqueda.",
+        "files": uploaded,
+    })
+
+
+@app.route("/api/session", methods=["GET"])
+def api_session():
+    return jsonify({
+        "messages": session.get("messages", []),
+        "has_denuncia": bool(session.get("pdf_path")),
+        "timestamp": int(time.time()),
+    })
+
+
 @app.route("/")
 def home():
-    session.clear()
     return render_template("index.html")
 
 @app.route("/movile")
 def movile():
-    session.clear()
     return render_template("movil.html")
 
 @app.route("/chat", methods=["POST"])
 def chat():
     try:
         data = request.json
-        user_message = data.get("message", "").strip().lower()
+        user_message_original = data.get("message", "").strip()
+        user_message = user_message_original.lower()
         
-        if not user_message:
+        if not user_message_original:
             return jsonify({"response": "No recibí ningún mensaje. 😕"})
 
         # Inicializar la conversación en session si no existe
@@ -189,14 +435,14 @@ def chat():
                 'continuar' o si tiene más dudas, por ejemplo:
                 "¿Tienes más dudas o deseas continuar con la denuncia?"
                 
-                📩 Pregunta del usuario: "{user_message}"
+                📩 Pregunta del usuario: "{user_message_original}"
                 """
 
                 messages = session["messages"]
-                messages.append({"role": "user", "content": user_message})
+                messages.append({"role": "user", "content": user_message_original})
 
                 completion_exp = client.chat.completions.create(
-                    model="gpt-4-turbo",
+                    model=CHAT_MODEL,
                     messages=[{"role": "system", "content": explanation_prompt}] + messages,
                     max_tokens=500
                 )
@@ -204,6 +450,7 @@ def chat():
                                         if completion_exp.choices else "No se pudo obtener una respuesta clara.")
 
                 # Actualizamos 'messages'
+                messages.append({"role": "assistant", "content": explanation_response})
                 session["messages"] = messages
 
                 # Devolvemos la explicación; seguimos en el MISMO dato
@@ -744,7 +991,7 @@ def chat():
 
 
                 completion_llm = client.chat.completions.create(
-                    model="gpt-4-turbo",
+                    model=CHAT_MODEL,
                     messages=[{"role": "system", "content": narraciones_prompt},
                               {"role": "user", "content": "Validar el texto anterior"}
                             ],
@@ -814,7 +1061,7 @@ def chat():
             ##
             ### Contexto:
             - **Dato solicitado:** {dato_actual}
-            - **Valor ingresado por el usuario:** "{user_message}"
+            - **Valor ingresado por el usuario:** "{user_message_original}"
 
             Explica por qué este dato es importante en el proceso de denuncia.  
             Si el usuario pide omitir o cancelar, respeta esa decisión.  
@@ -823,10 +1070,10 @@ def chat():
 
 
             messages = session["messages"]
-            messages.append({"role": "user", "content": user_message})
+            messages.append({"role": "user", "content": user_message_original})
 
             completion = client.chat.completions.create(
-                model="gpt-4-turbo",
+                model=CHAT_MODEL,
                 messages=[{"role": "system", "content": full_prompt}] + messages,
                 max_tokens=500
             )
@@ -834,6 +1081,7 @@ def chat():
                             if completion.choices else "No se pudo obtener una respuesta clara.")
 
             # Persistimos la conversación
+            messages.append({"role": "assistant", "content": bot_response})
             session["messages"] = messages
 
             # ¿el LLM confirma que el dato es válido?
@@ -906,7 +1154,7 @@ def chat():
             "necesito denunciar",
             "quiero denunciar"
         ]
-        user_message_clean = re.sub(r"[^\w\s]", "", user_message.lower()).strip()
+        user_message_clean = re.sub(r"[^\w\s]", "", user_message).strip()
         if user_message_clean in frases_activadoras:
             session["awaiting_decision"] = True
             texto = "¿Qué deseas hacer?. 1️.Iniciar el proceso de denuncia. 2️.Recibir orientación antes de denunciar. Escribe '1' para iniciar la denuncia o '2' para orientación."
@@ -970,17 +1218,17 @@ def chat():
 
                 messages = session["messages"]
                 messages.append({"role": "user", "content": "¿Cómo puedo presentar una denuncia?"})
-
-                completion = client.chat.completions.create(
-                    model="gpt-4-turbo",
-                    messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
-                    max_tokens=500
-                )
-
-                bot_response = (completion.choices[0].message.content
-                                if completion.choices else "No se pudo obtener una respuesta clara.")
+                bot_response = generate_grounded_reply("¿Cómo puedo presentar una denuncia?", messages)
+                if is_low_quality_response("¿Cómo puedo presentar una denuncia?", bot_response):
+                    bot_response = generate_grounded_reply(
+                        "¿Cómo puedo presentar una denuncia?",
+                        messages,
+                        strict=True,
+                        previous_answer=bot_response,
+                    )
 
                 # Persistimos mensajes
+                messages.append({"role": "assistant", "content": bot_response})
                 session["messages"] = messages
                 texto = bot_response + "\n\n🔹 ¿Te puedo ayudar en algo más?"
                 audio_response_path = text_to_speech(bot_response)
@@ -994,38 +1242,19 @@ def chat():
         # 3) Chat general si no se ha iniciado o no se está en proceso de denuncia
         # -----------------------------------------------------------------------
         messages = session["messages"]
-        messages.append({"role": "user", "content": user_message})
+        messages.append({"role": "user", "content": user_message_original})
 
-        completion = client.chat.completions.create(
-            model="gpt-4-turbo",
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
-            max_tokens=500
-        )
-        bot_response = (completion.choices[0].message.content 
-                        if completion.choices else "")
+        bot_response = generate_grounded_reply(user_message_original, messages)
+        if is_low_quality_response(user_message_original, bot_response):
+            bot_response = generate_grounded_reply(
+                user_message_original,
+                messages,
+                strict=True,
+                previous_answer=bot_response,
+            )
 
-        # Actualizar 'messages'
+        messages.append({"role": "assistant", "content": bot_response})
         session["messages"] = messages
-
-        # Manejo de respuestas vagas
-        vague_responses = ["no estoy seguro", "no tengo información", "no puedo responder"]
-        if any(vague in bot_response.lower() for vague in vague_responses):
-            retrieved_context = search_in_pdfs(user_message)
-            if retrieved_context:
-                full_prompt = f"""
-                {SYSTEM_PROMPT}
-                El usuario ha preguntado: "{user_message}"
-                No se encontró una respuesta clara, pero aquí hay información relevante:
-                {retrieved_context}
-                Responde de manera clara y útil utilizando esta información.
-                """
-                completion = client.chat.completions.create(
-                    model="gpt-4-turbo",
-                    messages=[{"role": "system", "content": full_prompt}] + messages,
-                    max_tokens=500
-                )
-                bot_response = (completion.choices[0].message.content 
-                                if completion.choices else "No se pudo obtener una respuesta clara.")
 
         bot_response_html = markdown.markdown(bot_response)
         audio_response_path = text_to_speech(bot_response)
@@ -1051,6 +1280,14 @@ def audio():
     audio_file.save(file_path)
 
     try:
+        if LLM_PROVIDER == "ollama":
+            return jsonify({
+                "error": (
+                    "La transcripción de audio no está disponible con Ollama. "
+                    "Usa el chat por texto o configura un transcriptor local separado."
+                )
+            }), 501
+
         # Transcribir el audio usando OpenAI Whisper
         with open(file_path, "rb") as f:
             transcript = client.audio.transcriptions.create(model="whisper-1", file=f)
@@ -1085,12 +1322,14 @@ def chat_request(user_message):
     messages.append({"role": "user", "content": user_message})
 
     try:
-        completion = client.chat.completions.create(
-            model="gpt-4-turbo",
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
-            max_tokens=500
-        )
-        bot_response = completion.choices[0].message.content if completion.choices else ""
+        bot_response = generate_grounded_reply(user_message, messages)
+        if is_low_quality_response(user_message, bot_response):
+            bot_response = generate_grounded_reply(
+                user_message,
+                messages,
+                strict=True,
+                previous_answer=bot_response,
+            )
 
         messages.append({"role": "assistant", "content": bot_response})
         session["messages"] = messages
@@ -1172,6 +1411,10 @@ def generar_denuncia():
         return jsonify({"error": f"Error al generar la denuncia: {str(e)}"}), 500
 
 if __name__ == "__main__":
+    ensure_ollama_models_ready()
+    if not PRELOAD_INDEX:
+        app.run(host="0.0.0.0", port=5000, debug=False)
+        sys.exit()
     with db_lock:  # Garantiza que solo un hilo cargue el índice FAISS
         if db is None and not app.debug:  
             db = load_or_create_index()

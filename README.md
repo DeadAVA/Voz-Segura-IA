@@ -33,13 +33,32 @@ El asistente está pensado para trabajar con documentación legal (PDFs) que el 
 
 Crea un archivo `.env` en la raíz o exporta las variables en tu entorno:
 
-- `OPENAI_API_KEY` - API Key para OpenAI (si se usan modelos OpenAI).
+- `LLM_PROVIDER` - Proveedor de modelos. Usa `ollama` para trabajar localmente sin tokens de OpenAI.
+- `OLLAMA_BASE_URL` - URL local de Ollama. Valor por defecto: `http://localhost:11434`.
+- `OLLAMA_CHAT_MODEL` - Modelo de chat local. Recomendado para 16 GB RAM: `qwen2.5:14b`.
+- `OLLAMA_EMBEDDING_MODEL` - Modelo de embeddings local. Recomendado: `nomic-embed-text-v2-moe`.
+- `OLLAMA_EMBEDDING_BATCH_SIZE` - Cantidad de fragmentos enviados por lote a Ollama. Valor por defecto: `32`.
+- `PDF_CHUNK_SIZE` y `PDF_CHUNK_OVERLAP` - Tamaño y traslape de fragmentos para FAISS. Valores por defecto: `1600` y `150`.
+- `PRELOAD_INDEX` - Si es `true`, genera/carga FAISS antes de levantar Flask. Valor por defecto: `false`.
+- `OPENAI_API_KEY` - API Key para OpenAI (solo si `LLM_PROVIDER=openai`).
 - `SECRET_KEY` - Clave secreta de Flask para sesiones.
 
 Ejemplo mínimo de `.env`:
 
-OPENAI_API_KEY=tu_api_key_aqui
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_CHAT_MODEL=qwen2.5:14b
+OLLAMA_EMBEDDING_MODEL=nomic-embed-text-v2-moe
+OLLAMA_EMBEDDING_BATCH_SIZE=32
+PDF_CHUNK_SIZE=1600
+PDF_CHUNK_OVERLAP=150
+PRELOAD_INDEX=false
 SECRET_KEY=una_clave_larga_y_secreta
+
+Antes de ejecutar en modo Ollama:
+
+    ollama pull qwen2.5:14b
+    ollama pull nomic-embed-text-v2-moe
 
 ## Instalación y ejecución (local)
 
