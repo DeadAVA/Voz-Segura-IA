@@ -107,12 +107,3 @@ Lee `CONTRIBUTING.md` para saber cómo colaborar. Se agradecen correcciones, mej
 ## Licencia
 
 Este repositorio incluye un archivo `LICENSE` (MIT) por defecto. Revisa y cambia si prefieres otra licencia.
-
----
-
-Si quieres, puedo:
-
-- Crear issues y un primer commit con estos archivos.
-- Ayudarte a crear un flujo de CI básico.
-
-Dime qué prefieres que haga a continuación.
